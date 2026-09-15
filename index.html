@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Citation Library Add-in</title>
+    <!-- 引入 Office.js -->
+    <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+    <!-- 引入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="p-4 bg-gray-50 text-sm">
+    <h2 class="text-lg font-bold mb-2 text-blue-800">論文文獻庫系統</h2>
+    <div class="mb-4">
+        <label class="block text-gray-700 font-bold mb-1">貼上 Google Scholar 引用文字:</label>
+        <textarea id="citationInput" class="w-full p-2 border rounded shadow-sm h-24" placeholder="例如貼上 APA 或 MLA 格式..."></textarea>
+        <button onclick="addCitation()" class="mt-2 bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 w-full font-bold">解析並加入文獻庫</button>
+    </div>
+    <h3 class="font-bold text-gray-700 mb-1 border-b pb-1">我的文獻庫</h3>
+    <div id="libraryContainer" class="space-y-2 mt-2"></div>
+
+    <script>
+        let library = [];
+
+        Office.onReady((info) => {
+            if (info.host === Office.HostType.Word) {
+                loadLibrary(); 
+            }
+        });
+
+        function parseCitationString(text) {
+            const yearMatch = text.match(/\((\d{4})\)/) || text.match(/, (\d{4}),/);
+            const year = yearMatch ? yearMatch[1] : "未知";
+            const id = "ref_" + Date.now(); 
+            return { id: id, originalText: text, year: year, displayTitle: text.substring(0, 60) + "..." };
+        }
+
+        function addCitation() {
+            const input = document.getElementById('citationInput').value;
+            if (!input) return;
+            const newRef = parseCitationString(input);
+            library.push(newRef);
+            document.getElementById('citationInput').value = '';
+            localStorage.setItem('my_citation_library', JSON.stringify(library));
+            renderLibrary();
+        }
+
+        function renderLibrary() {
+            const container = document.getElementById('libraryContainer');
+            container.innerHTML = '';
+            library.forEach((ref) => {
+                const item = document.createElement('div');
+                item.className = "p-2 bg-white border rounded shadow-sm flex justify-between items-center";
+                item.innerHTML = `
+                    <div class="text-xs text-gray-800 truncate w-3/4" title="${ref.originalText}">
+                        <b>${ref.year}</b> - ${ref.displayTitle}
+                    </div>
+                    <button onclick="insertAndRefresh('${ref.id}')" class="bg-green-600 text-white px-2 py-1 rounded text-xs hover:bg-green-700">插入</button>
+                `;
+                container.appendChild(item);
+            });
+        }
+
+        function loadLibrary() {
+            const stored = localStorage.getItem('my_citation_library');
+            if (stored) {
+                library = JSON.parse(stored);
+                renderLibrary();
+            }
+        }
+
+        async function insertAndRefresh(refId) {
+            await Word.run(async (context) => {
+                const selection = context.document.getSelection();
+                const cc = selection.insertContentControl();
+                cc.tag = refId;
+                cc.title = "Citation";
+                cc.appearance = "BoundingBox"; 
+                cc.cannotEdit = true; 
+                await context.sync();
+
+                const controls = context.document.contentControls;
+                controls.load("items/tag, items/text");
+                await context.sync();
+
+                let citedList = []; 
+                let uniqueIds = [];
+
+                controls.items.forEach((control) => {
+                    if (control.title === "Citation") {
+                        const cid = control.tag;
+                        let orderIndex = uniqueIds.indexOf(cid);
+                        if (orderIndex === -1) {
+                            uniqueIds.push(cid);
+                            orderIndex = uniqueIds.length - 1;
+                            const refData = library.find(r => r.id === cid);
+                            if (refData) citedList.push(refData);
+                        }
+                        control.insertText(`[${orderIndex + 1}]`, Word.InsertLocation.replace);
+                    }
+                });
+                await context.sync();
+                await updateBibliographyBlock(context, citedList);
+            });
+        }
+
+        async function updateBibliographyBlock(context, citedList) {
+            const controls = context.document.contentControls;
+            controls.load("items/title");
+            await context.sync();
+
+            let bibControl = controls.items.find(c => c.title === "Bibliography");
+            if (!bibControl) {
+                const body = context.document.body;
+                body.insertParagraph("References", Word.InsertLocation.end);
+                bibControl = body.insertContentControl();
+                bibControl.title = "Bibliography";
+                bibControl.tag = "Bibliography";
+            }
+
+            bibControl.clear();
+            let htmlString = "";
+            citedList.forEach((ref, index) => {
+                htmlString += `<p>[${index + 1}] ${ref.originalText}</p>`;
+            });
+            
+            bibControl.insertHtml(htmlString, Word.InsertLocation.replace);
+            await context.sync();
+        }
+    </script>
+</body>
+</html>
