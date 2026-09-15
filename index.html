@@ -35,7 +35,7 @@
         }
 
         function addCitation() {
-            const input = document.getElementById('citationInput').value;
+            const input = document.getElementById('citationInput').value.trim();
             if (!input) return;
             const newRef = parseCitationString(input);
             library.push(newRef);
@@ -69,61 +69,85 @@
         }
 
         async function insertAndRefresh(refId) {
-            await Word.run(async (context) => {
-                const selection = context.document.getSelection();
-                const cc = selection.insertContentControl();
-                cc.tag = refId;
-                cc.title = "Citation";
-                cc.appearance = "BoundingBox"; 
-                cc.cannotEdit = true; 
-                await context.sync();
+            try {
+                await Word.run(async (context) => {
+                    // 1. 在游標處插入標記 (先不鎖定)
+                    const selection = context.document.getSelection();
+                    const cc = selection.insertContentControl();
+                    cc.tag = refId;
+                    cc.title = "Citation";
+                    cc.appearance = "BoundingBox";
+                    cc.cannotEdit = false; 
+                    cc.insertText("[*]", "Replace"); // 給予初始佔位符
+                    await context.sync();
 
-                const controls = context.document.contentControls;
-                controls.load("items/tag, items/text");
-                await context.sync();
+                    // 2. 重新掃描整份文件並編號
+                    const controls = context.document.contentControls;
+                    controls.load("items/tag, items/title");
+                    await context.sync();
 
-                let citedList = []; 
-                let uniqueIds = [];
+                    let citedList = []; 
+                    let uniqueIds = [];
 
-                controls.items.forEach((control) => {
-                    if (control.title === "Citation") {
-                        const cid = control.tag;
-                        let orderIndex = uniqueIds.indexOf(cid);
-                        if (orderIndex === -1) {
-                            uniqueIds.push(cid);
-                            orderIndex = uniqueIds.length - 1;
-                            const refData = library.find(r => r.id === cid);
-                            if (refData) citedList.push(refData);
+                    controls.items.forEach((control) => {
+                        if (control.title === "Citation") {
+                            const cid = control.tag;
+                            let orderIndex = uniqueIds.indexOf(cid);
+                            if (orderIndex === -1) {
+                                uniqueIds.push(cid);
+                                orderIndex = uniqueIds.length - 1;
+                                const refData = library.find(r => r.id === cid);
+                                if (refData) citedList.push(refData);
+                            }
+                            
+                            // 更新編號：先解鎖 -> 寫入 -> 再鎖定
+                            control.cannotEdit = false;
+                            control.insertText(`[${orderIndex + 1}]`, "Replace");
+                            control.cannotEdit = true;
                         }
-                        control.insertText(`[${orderIndex + 1}]`, Word.InsertLocation.replace);
-                    }
+                    });
+                    await context.sync();
+
+                    // 3. 更新文末參考文獻清單
+                    await updateBibliographyBlock(context, citedList);
                 });
-                await context.sync();
-                await updateBibliographyBlock(context, citedList);
-            });
+            } catch (error) {
+                console.error("執行錯誤: ", error);
+            }
         }
 
         async function updateBibliographyBlock(context, citedList) {
             const controls = context.document.contentControls;
-            controls.load("items/title");
+            controls.load("items/title, items/tag");
             await context.sync();
 
             let bibControl = controls.items.find(c => c.title === "Bibliography");
+            
             if (!bibControl) {
+                // 正確的做法：在文件最底部插入獨立段落，再將該段落轉為控制項
                 const body = context.document.body;
-                body.insertParagraph("References", Word.InsertLocation.end);
-                bibControl = body.insertContentControl();
+                body.insertParagraph("References", "End");
+                const refPara = body.insertParagraph("", "End");
+                bibControl = refPara.insertContentControl();
                 bibControl.title = "Bibliography";
                 bibControl.tag = "Bibliography";
             }
 
+            // 清空並寫入新清單
+            bibControl.cannotEdit = false;
             bibControl.clear();
+            
             let htmlString = "";
             citedList.forEach((ref, index) => {
-                htmlString += `<p>[${index + 1}] ${ref.originalText}</p>`;
+                htmlString += `<p><b>[${index + 1}]</b> ${ref.originalText}</p>`;
             });
             
-            bibControl.insertHtml(htmlString, Word.InsertLocation.replace);
+            if (htmlString !== "") {
+                bibControl.insertHtml(htmlString, "Replace");
+            }
+            
+            // 將文獻區塊也鎖定，避免誤刪
+            bibControl.cannotEdit = true;
             await context.sync();
         }
     </script>
